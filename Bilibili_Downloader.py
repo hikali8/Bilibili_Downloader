@@ -11,12 +11,6 @@ import win32file, win32pipe
 import bisect
 
 
-
-###
-# 需改进之处：
-# 获取文件大小时，分离响应头和响应体的获取过程
-###
-
 user_agents = [
     "Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1; SV1; AcooBrowser; .NET CLR 1.1.4322; .NET CLR 2.0.50727)",
     "Mozilla/4.0 (compatible; MSIE 7.0; Windows NT 6.0; Acoo Browser; SLCC1; .NET CLR 2.0.50727; Media Center PC 5.0; .NET CLR 3.0.04506)",
