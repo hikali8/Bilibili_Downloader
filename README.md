@@ -9,7 +9,9 @@ A simple multi-coroutine bilibili video downloader / 一个简单的多协程哔
 2. 单个视频下载速度极佳，多个视频则会受到服务端限制（在get方法处阻塞），但总体速度依然很快
 3. 音视频合并部分目前采用ffmpeg，因为工具太大了无法上传，如果使用还需按工具目录中的说明确保工具备齐
 4. 可在登录状态下载视频，需要手动填写SESSDATA（Cookie中复制过来就行）
-5. 可以断点续传，也就是说上次下载的内容如果被打断，下次下载时还可以恢复进度（实现起来不简单，详情请查看DownItem.arrange_fragments()方法）
+5. 可以断点续传，也就是说上次下载的内容如果被打断，下次下载时还可以恢复进度
+6. 可下载分P视频
+7. 可下载合集视频
 
 # Declaration / 声明
 This repository is merely for studying, please don't use it for illegal intention! If there's any transgression, all of the ill effects and consequences are <u>not related</u> to me
