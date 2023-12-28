@@ -1,3 +1,4 @@
+import json
 import re, time, secrets
 import os, shutil, bisect
 import asyncio, aiohttp, aiofiles
@@ -5,6 +6,12 @@ import win32file, win32pipe, msvcrt
 import subprocess, threading, pickle
 import sys
 from collections.abc import Awaitable
+
+
+# 5个用户端
+ClientNum = 5
+# 填入你的SESSDATA
+MySESSDATA = 'toFill'
 
 
 user_agents = [
@@ -75,8 +82,6 @@ class Client:
         await self.session.__aexit__(None, None, None)
         self.session = await aiohttp.ClientSession().__aenter__()
 
-
-ClientNum = 5   # 5个用户端
 clients = []
 clients: list[Client]
 semaphore = asyncio.Semaphore(ClientNum)
@@ -84,11 +89,11 @@ semaphore = asyncio.Semaphore(ClientNum)
 ChunkSize = 1024 * 30
 
 # 创建命名管道
-ph = None
+ph_write = None
 
 def send_data(data):
-    global ph
-    win32file.WriteFile(ph, len(data).to_bytes(2, byteorder='little') + data)
+    global ph_write
+    win32file.WriteFile(ph_write, len(data).to_bytes(2, byteorder='little') + data)
 
 
 amountDict = {}
@@ -106,7 +111,7 @@ def amountDictSendThread():
             time.sleep(sleep_time)
             cur_time = next_time
 
-def displayProcess(pfd):
+def displayProcess(pf_read):
     # infoList: [(cid, file_name, total_amount: int, unit, annotation), ...]
     # amountDict: {cid: current_amount: int, ...}
 
@@ -114,7 +119,7 @@ def displayProcess(pfd):
     # need: cid, (file_name, total_amount, unit, annotation)|cur_amount
     # data_format: frame_length:2, (file_name, total_amount, unit, annotation)(and cid:int4)|amountDict|Done(bool:pickle, and cid:int4):pickle
 
-    fh = msvcrt.get_osfhandle(pfd.fileno())
+    fh = msvcrt.get_osfhandle(pf_read.fileno())
     interval = 0.1  # 刷新的间隔
     window_length = 5   # 统计3秒内的内容
     infoDict = {}
@@ -123,8 +128,8 @@ def displayProcess(pfd):
     while True:
         # 获取管道所有更新
         while win32pipe.PeekNamedPipe(fh, 0)[1] != 0:  # 有东西才读
-            frame_length = int.from_bytes(pfd.read(2), byteorder='little')
-            reads = pfd.read(frame_length)
+            frame_length = int.from_bytes(pf_read.read(2), byteorder='little')
+            reads = pf_read.read(frame_length)
             stuff = pickle.loads(reads)
             hisType = type(stuff)
             if hisType is tuple:
@@ -490,7 +495,8 @@ class DownCoroutine:
             try:
                 if await func():   # 异步函数，且返回值为 bool
                     return True
-            except (aiohttp.ClientPayloadError, aiohttp.ClientConnectorError, asyncio.exceptions.TimeoutError) as e:
+            except (aiohttp.ClientPayloadError, aiohttp.ClientConnectorError,
+                    asyncio.exceptions.TimeoutError, aiohttp.client_exceptions.ServerDisconnectedError) as e:
                 print("错误：", type(e), "——", e, sep='')
             # except Exception as e:
             #     print("出错：", type(e), "——", e, sep='')
@@ -611,7 +617,8 @@ async def get_source_code(url) -> str:
         with clients.pop() as client:
             headers = {
                 'Referer': client.referer,
-                "user-agent": client.userAgent
+                "user-agent": client.userAgent,
+                "Cookie": f"SESSDATA={MySESSDATA}"
             }
             async def real_part() -> bool:
                 nonlocal text
@@ -621,14 +628,72 @@ async def get_source_code(url) -> str:
             await DownCoroutine.enretryable(real_part, client)
     return text
 
+
+wanted_height = -1
+wanted_frameRate = -1
+wanted_codecs = "av01"     # 写死codecs，后面用配置文件设置
 def get_vurl(source_code):  # 要获取清晰度最高的视频链接
-    video_id = re.search(r'"video":\s*\[\{\s*"id":\s*(\d+?),', source_code).group(1)
-    p = re.compile(r'"id":\s*%s,\s*"baseUrl":\s*"(.*?)",' % video_id)
-    return p.findall(source_code)[-1]  # 下载最后一个AV1格式的视频，压缩率最高
+    playinfo = json.loads(re.search(r'<script>\s*window.__playinfo__\s*=\s*(\{\s*.*?\s*\})\s*</script>',
+                                    source_code, re.S).group(1))
+    videos = {}
+    for video in playinfo["data"]["dash"]["video"]:
+        height = video['height']
+        data = (int(video['frameRate'].split('.', 1)[0]), video['codecs'], video['baseUrl'], video['backupUrl'])
+        if height in videos:
+            bisect.insort(videos[height], data, key=lambda e: -e[0])
+        else:
+            videos[height] = [data]
+    videos = list(videos.items())
+    global wanted_height, wanted_frameRate
+    if wanted_height == -1:
+        # 获取用户要的清晰度
+        # 得先排序清晰度
+        videos.sort(key=lambda e: -e[0])
+        print("-"*40)
+        print("现在有这些清晰度：")
+        n = 1
+        choseList = []
+        for height, datas in videos:
+            prevFR = -1
+            for data in datas:
+                frameRate = data[0]
+                if frameRate == prevFR:
+                    continue
+                choseList.append((height, frameRate))
+                print(n, '. ', height, sep='', end='')
+                if frameRate != 30:
+                    print(" ", frameRate, "帧", end='')
+                print()
+                n += 1
+                prevFR = frameRate
+        wanted_n = input("请输入想要的清晰度（默认第一个）:")
+        try:    wanted_index = int(wanted_n) - 1
+        except ValueError:  wanted_index = 0
+        wanted_height, wanted_frameRate = choseList[wanted_index]
+        print("选择了清晰度", wanted_height, end='')
+        if wanted_frameRate != 30:
+            print(" ", wanted_frameRate, "帧", end='')
+        print("...（后续视频也将采取此清晰度）")
+        print('-'*40)
+    for height, datas in videos:    # 直接选，可以不排序
+        if height != wanted_height:
+            continue
+        for frameRate, codecs, baseUrl, backupUrls in datas:
+            if frameRate != wanted_frameRate:
+                continue
+            if not codecs.startswith(wanted_codecs):
+                continue
+            # vurls.append(baseUrl)
+            # vurls.extend(backupUrls)
+            return baseUrl  # 先只要一个baseUrl试试水
+    # 原代码：
+    # video_id = re.search(r'"video":\s*\[\{\s*"id":\s*(\d+?),', source_code).group(1)
+    # p = re.compile(r'"id":\s*%s,\s*"baseUrl":\s*"(.*?)",' % video_id)
+    # return p.findall(source_code)[-1]  # 下载最后一个AV1格式的视频，压缩率最高
 # 不知道为什么，HEVC的下载速度比AV1慢很多
 
 def get_aurl(source_code):
-    return re.search(r'"audio":\[\{"id":\d+?,"baseUrl":"(.*?)"', source_code).group(1)  # 第一个就行
+    return re.search(r'"audio":\[\{"id":\d+?,"baseUrl":"(.*?)"', source_code).group(1)  # 第一个就行，音质最高
 
 
 async def get_bvs(url: str, bvid: str, page: int) -> tuple:
@@ -679,9 +744,9 @@ def onlyVA(source_code):
 
 
 async def start(awaitable: Awaitable) -> bool:
-    global ph, amountDict, threadAlive
+    global ph_write, amountDict, threadAlive
     t = time.time()
-    ph = win32pipe.CreateNamedPipe(
+    ph_write = win32pipe.CreateNamedPipe(
         r'\\.\pipe\show_pipe',
         win32pipe.PIPE_ACCESS_OUTBOUND,
         win32pipe.PIPE_TYPE_MESSAGE | win32pipe.PIPE_READMODE_MESSAGE | win32pipe.PIPE_WAIT,
@@ -692,7 +757,7 @@ async def start(awaitable: Awaitable) -> bool:
     displayProcess = subprocess.Popen((sys.executable, __file__, '-c'),
         creationflags=subprocess.CREATE_NEW_CONSOLE)
     print("等待客户端连接...")
-    win32pipe.ConnectNamedPipe(ph, None)
+    win32pipe.ConnectNamedPipe(ph_write, None)
     print("连起了!")
     # 发送线程
     sendThread = threading.Thread(target=amountDictSendThread)
@@ -703,7 +768,7 @@ async def start(awaitable: Awaitable) -> bool:
     threadAlive = False
     while sendThread.is_alive(): pass
     displayProcess.terminate()
-    win32file.CloseHandle(ph)
+    win32file.CloseHandle(ph_write)
     print("下载", "完毕" if ret else "失败", "！", sep='')
     print("总用时：", time.time() - t, "s", sep='')
     return ret
@@ -780,9 +845,8 @@ async def init():
 if __name__ == '__main__':
     if '-c' in sys.argv:
         # 子进程
-        with open(r'\\.\pipe\show_pipe', "rb") as pfd:  # 打开读取端的句柄
-            displayProcess(pfd)
-            os.system('pause')
+        with open(r'\\.\pipe\show_pipe', "rb") as pf_read:  # 打开读取端的句柄
+            displayProcess(pf_read)
     else:
         #父进程
         asyncio.run(init())
