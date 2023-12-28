@@ -550,7 +550,8 @@ class DownCoroutine:
                 theoretical_end = start + actualSize - 1
                 if end != theoretical_end:
                     assert end > theoretical_end
-                    os.rename(self.tempDir + f, self.tempDir + f"{start}-{theoretical_end}" + ext)
+                    end = theoretical_end
+                    os.rename(self.tempDir + f, self.tempDir + f"{start}-{end}" + ext)
                 if ext in extFragsDict:
                     bisect.insort(extFragsDict[ext], [start, end], key=lambda r:r[0])
                 else:
@@ -568,6 +569,7 @@ class DownCoroutine:
                 if start1 < end2 + 2:  # start1 ~ [start2, end2 + 1]
                     if end1 <= end2:
                         os.remove(self.tempDir + f'{start1}-{end1}' + ext)  # 没有用直接删掉
+                        seqFragsList.append(seq)
                         continue
                     # end1 ~ [end2 + 1, ...]
                     if start1 <= end2:  # start1 != end2 + 1
