@@ -1,17 +1,17 @@
-import json
-import re, time, secrets
+import re, json
+import secrets
 import os, shutil, bisect
 import asyncio, aiohttp, aiofiles
 import win32file, win32pipe, msvcrt
 import subprocess, threading, pickle
-import sys
+import sys, time
 from collections.abc import Awaitable
 
 
 # 5个用户端
 ClientNum = 5
 # 填入你的SESSDATA
-MySESSDATA = 'toFill'
+MySESSDATA = 'to_fill'
 
 
 user_agents = [
@@ -545,12 +545,12 @@ class DownCoroutine:
                 # 按实际大小更正end
                 actualSize = os.path.getsize(self.tempDir + f)
                 if actualSize == 0:
-                    os.remove(f)
+                    os.remove(self.tempDir + f)
                     continue
                 theoretical_end = start + actualSize - 1
                 if end != theoretical_end:
                     assert end > theoretical_end
-                    os.rename(f, f"{start}-{theoretical_end}" + ext)
+                    os.rename(self.tempDir + f, self.tempDir + f"{start}-{theoretical_end}" + ext)
                 if ext in extFragsDict:
                     bisect.insort(extFragsDict[ext], [start, end], key=lambda r:r[0])
                 else:
