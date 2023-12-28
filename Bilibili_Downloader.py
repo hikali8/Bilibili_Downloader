@@ -1,3 +1,4 @@
+import math
 import pickle
 import subprocess, threading
 import sys
@@ -6,10 +7,12 @@ from collections.abc import Awaitable
 import re, time, secrets
 import os, shutil
 import asyncio, aiohttp, aiofiles
+from typing import Coroutine, Iterable
 
 import win32file, win32pipe
 import bisect
 
+from sortedcontainers import SortedSet
 
 user_agents = [
     "Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1; SV1; AcooBrowser; .NET CLR 1.1.4322; .NET CLR 2.0.50727)",
@@ -80,12 +83,12 @@ class Client:
         self.session = await aiohttp.ClientSession().__aenter__()
 
 
-clientNum = 12   # 12个用户端
+ClientNum = 5   # 5个用户端
 clients = []
 clients: list[Client]
-semaphore = asyncio.Semaphore(clientNum)
+semaphore = asyncio.Semaphore(ClientNum)
 
-chunkSize = 1024 * 30
+ChunkSize = 1024 * 30
 
 # 创建命名管道
 ph = None
@@ -103,13 +106,13 @@ def amountDictSendThread():
     cur_time = time.time()
     while threadAlive:
         send_data(pickle.dumps(amountDict))
-        prev_time = cur_time
-        next_time = prev_time + interval
+        next_time = cur_time + interval
         cur_time = time.time()
         sleep_time = next_time - cur_time
         if sleep_time > 0:
             time.sleep(sleep_time)
             cur_time = next_time
+
 
 
 
@@ -134,6 +137,7 @@ class DownCoroutine:
         send_data(pickle.dumps(True) + int.to_bytes(self.cid, 4, byteorder='little'))
         print(self.fileName, "is done!")
 
+
     types = ("视频", "音频")
     async def main_logic(self) -> bool:
         # 检查是不是已经有文件了，这样就不用下载
@@ -155,19 +159,34 @@ class DownCoroutine:
         # 还要检查缓存目录是否存在
         if not os.path.isdir(self.tempDir):
             os.makedirs(self.tempDir)
-        # 下载视频部分
-        if not await self._download1(0):
-            self.end()
-            return False
-        # 下载音频部分
-        if not await self._download1(1):
-            self.end()
-            return False
-        # 合并音视频
-        send_data(pickle.dumps((self.fileName, 1, '', "正在合并音视频..."))
+        # 还要检查上次下载的分片，并合并未经合并的
+        fragsDict = self.arrange_fragments()
+        # 下载视频与音频
+        for i in range(2):
+            existingFrags = None
+            ext = exts[i]
+            if ext in fragsDict:
+                existingFrags = fragsDict[ext]
+            # 开始下载
+            if not await self._download1(ext, self.types[i], self.urls[i], existingFrags):
+                self.end()
+                return False
+        # 合并下载的所有碎片，并合并最终视频
+        send_data(pickle.dumps((self.fileName, 1, '', "正在合并下载碎片..."))
                   + int.to_bytes(self.cid, 4, byteorder='little'))
-        if not self.mergeVA():
-            print(self.fileName, "合并音视频失败！")
+        fragsDict = self.arrange_fragments()
+        if exts[0] not in fragsDict or exts[1] not in fragsDict:
+            print(self.fileName, "合并下载碎片未得！", sep='')
+            self.end()
+            return False
+        vFrags = fragsDict[exts[0]]
+        aFrags = fragsDict[exts[1]]
+        assert len(vFrags) == 1 and len(aFrags) == 1
+        # 合并视音频
+        send_data(pickle.dumps((self.fileName, 1, '', "正在合并视音频..."))
+                  + int.to_bytes(self.cid, 4, byteorder='little'))
+        if not self.mergeVA(vFrags[0], aFrags[0]):
+            print(self.fileName, "合并视音频失败！")
             self.end()
             return False
         # 清理缓存
@@ -178,97 +197,185 @@ class DownCoroutine:
         return True
 
 
-    async def _download1(self, i: int) -> bool:
+    async def _download1(self, ext, what, url, frags) -> bool:
+        # 已经下载了的碎片：
+        # fragments: [[start1, end1], [start2, end2], ...]
         # i: 0视频, 1音频
-        ext = exts[i]
-        what = self.types[i]
-        # 检查是否已有
-        if os.path.isfile(self.tempDir + 'plus' + ext):
-            print(self.fileName, "的", what, "部分已有了！", sep='')
-            return True
         # 获取大小
         send_data(pickle.dumps((self.fileName, 1, '', "正在获取" + what + "部分的大小..."))
                   + int.to_bytes(self.cid, 4, byteorder='little'))
-        size = await self.get_size(self.urls[i])
+        size = await self.get_size(url)
         if size == -1:
             print(self.fileName, "获取", what, "部分的大小失败！", sep='')
             return False
+        # 检查是否并无已有的分片文件
+        final_end = size - 1
+        undoneRangesList = []
+        if frags is None:
+            undoneRangesList.append((0, final_end))
+        else:
+            # 检查是否已有全部的数据
+            if frags[0][0] == 0 and frags[0][1] == final_end:
+                print(self.fileName, "的", what, "部分已有了！", sep='')
+                return True
+            # 获得未有的范围
+            for r1, r2 in zip(frags, frags[1:]):
+                undoneRangesList.append((r1[1] + 1, r2[0] - 1))
+            else:
+                final_start = frags.pop()[1] + 1
+                if final_start <= final_end:
+                    undoneRangesList.append((final_start, final_end))
         # 开始下载
         send_data(pickle.dumps((self.fileName, size, 'B', "正在下载" + what + "部分..."))
                   + int.to_bytes(self.cid, 4, byteorder='little'))
         amountDict[self.cid] = 0
-        if not await self._download2(self.urls[i], size, ext):
+        if not await self._download2(url, ext, undoneRangesList):
             print(self.fileName, "下载", what, "部分失败！", sep='')
             return False
         del amountDict[self.cid]
-        # 开始合并
-        send_data(pickle.dumps((self.fileName, 1, '', "正在合并" + what + "部分..."))
-                  + int.to_bytes(self.cid, 4, byteorder='little'))
-        if self.copy_ranges(ext):
-            return True
-        print(self.fileName, "合并", what, "部分失败！", sep='')
-        return False
+        return True
 
 
-    async def _download2(self, url, size, ext):
+    async def _download2(self, url, ext, undoneRangesList: list[tuple]):
         # 按剩余的clients数量，分成多个部分，分别下载
         # 信号量和剩余用户端数有可能不一样，用户端可能释放了还没有被用，但信号量却是瞬间分配的
+        ## 以上是以前的注释
+        # 排序
+        undoneRangesList.sort(key=lambda r: r[0] - r[1])   # 最小的在后
+        # 获取总下载大小
+        size = 0
+        for r in undoneRangesList:
+            size += r[1] - r[0] + 1
+        # 获取客户端数量
         await semaphore.acquire()   # 至少要一个
         semaphore._value += 1   # 只能这样，release会瞬间分配出去
-        cur_clientsNum = semaphore._value
-        _quotient = size // cur_clientsNum
-        _remainder = size % cur_clientsNum
+        clientsNum = semaphore._value
+        # 分配任务
+        quotient = size // clientsNum
+        remainder = size % clientsNum
         coList = []
-        start = 0
-        for i in range(cur_clientsNum):
-            next_start = start + _quotient
-            if _remainder:
-                next_start += 1
-                _remainder -= 1
-            coList.append(self.downRange(url, start, next_start - 1, ext))  # 经测试，pop()运行快于[0]
-            start = next_start
+        for i in range(clientsNum):
+            toDownSize = quotient
+            if remainder:
+                toDownSize += 1
+                remainder -= 1
+            toDownRanges = []
+            while True:
+                minTask = undoneRangesList.pop()
+                s1 = minTask[0]
+                e1 = minTask[1]
+                e2 = s1 + toDownSize - 1
+                if e2 <= e1:
+                    toDownRanges.append((s1, e2))
+                    if e2 < e1:
+                        undoneRangesList.append((e2 + 1, e1))
+                    break
+                toDownRanges.append((s1, e1))
+                toDownSize -= e1 - s1 + 1
+            coList.append(self.downRanges(url, ext, toDownRanges))
         # return True: all succeeded
-        ret = all(await asyncio.gather(*coList))
-        return ret
+        return all(await asyncio.gather(*coList))
+        # st1 = 0
+        # for i in range(clientsNum):
+        #     next_start = st1 + _quotient
+        #     if _remainder:
+        #         next_start += 1
+        #         _remainder -= 1
+        #     coList.append(self.downRange(url, st1, next_start - 1, ext))  # 经测试，pop()运行快于[0]
+        #     st1 = next_start
+        # return True: all succeeded
+        # return all(await asyncio.gather(*coList))
+        # coList = []
+        # while len(undoneRangesList):
+        #     minTast = undoneRangesList.pop(0)
+        #     start = minTast[0]
+        #     end = minTast[1]
+        #     coDownOffset = end - start
+        #     if coDownOffset >= ChunkSize:
+        #         undoneRangesList.insert(0, minTast)
+        #         coList.extend(await self.tryToAllocateTasks(
+        #             clientsNum, coDownOffset, undoneRangesList, url, ext))
+        #         break
+        #     coList.append(self.downRange(url, start, end, ext))
+        #     clientsNum -= 1
+        #     if clientsNum == 0:
+        #         if not all(await asyncio.gather(*coList)):
+        #             return False
+        #         del coList[:]
+        #         await semaphore.acquire()  # 至少要一个
+        #         semaphore._value += 1
+        #         clientsNum = semaphore._value
+        # return all(await asyncio.gather(*coList))
 
 
-    async def downRange(self, url, start, end, ext) -> bool:
+    # async def tryToAllocateTasks(self, clientsNum, coDownOffset, undoneRangesList, url, ext):
+    #     _clientsNum = clientsNum
+    #     _coList = []
+    #     fatal = False
+    #     while True:
+    #         for i, (s2, e2) in enumerate(undoneRangesList):
+    #             next_end = s2 + coDownOffset
+    #             while next_end <= e2:
+    #                 _coList.append(self.downRange(url, s2, next_end, ext))
+    #                 s2 = next_end + 1
+    #                 next_end = s2 + coDownOffset
+    #                 _clientsNum -= 1
+    #                 if _clientsNum == 0:
+    #                     del undoneRangesList[:i + 1]
+    #                     undoneRangesList.append((s2, e2))
+    #                     return _coList
+    #             if s2 <= e2:
+    #                 _coList.append(self.downRange(url, s2, e2, ext))
+    #                 _clientsNum -= 1
+    #                 if _clientsNum == 0:
+    #                     del undoneRangesList[:i + 1]
+    #                     return _coList
+    #         # 分配失败，还有剩的client
+    #         if fatal:
+    #             return _coList
+    #         _clientsNum = clientsNum
+    #         del _coList[:]
+    #         coDownOffset >>= 1  # 除以2
+    #         # 如果实在不行
+    #         if coDownOffset < ChunkSize:
+    #             # 最后 ChunkSize最小量再试分一次任务
+    #             coDownOffset = ChunkSize
+    #             fatal = True
+
+
+    async def downRanges(self, url, ext, undoneRangesList: list[tuple]) -> bool:
         # [start, end] (including the end...)
         # 要检查当前块是不是也下载了（——目前还不是很完善，因为命名会有区别的）
         # 命名的话，还是就start-end.ext就行了，不要自己命名
-        rangePath = self.tempDir + str(start) + '-' + str(end) + ext
-        # 检查范围是不是已存在
-        if os.path.isfile(rangePath):
-            what = self.types[exts.index(ext)] # 少进，所以单独索引
-            print(self.fileName, "的", what, "部分已有范围", start, "-", end, "的内容", sep='')
-            return True
         # 开始下载对应内容
         async with semaphore:
             with clients.pop() as client:   # 经测试，pop()运行快于[0]
-                headers = {
-                    'Range': f'bytes={start}-{end}',
-                    'Referer': client.referer,
-                    'User-Agent': client.userAgent
-                }
-                async def real_part() -> bool:
-                    async with aiofiles.open(rangePath, 'wb') as f:
-                        async with client.session.get(url, headers=headers) as resp:
-                            while True:
-                                if resp.status != 206:
-                                    print(resp.status)
-                                    return False
-                                chunk = await resp.content.read(chunkSize)
-                                if not chunk:
-                                    return True
-                                amountDict[self.cid] += len(chunk)
-                                await f.write(chunk)
-                if await self.enretryable(real_part, client):
-                    # 成功后重置一下client再归还
-                    await client.reset()    # 目前来看，获取源码->获取大小->获取文件是一个很连续的过程，只应该在最后才重置
-                    return True
-        what = self.types[exts.index(ext)] # 少进，所以单独索引
-        print(self.fileName, "的", what, "部分下载范围", start, "-", end, "的内容失败", sep='')
-        return False
+                for s, e in undoneRangesList:
+                    rangePath = self.tempDir + f'{s}-{e}' + ext
+                    headers = {
+                        'Range': f'bytes={s}-{e}',
+                        'Referer': client.referer,
+                        'User-Agent': client.userAgent
+                    }
+                    async def real_part() -> bool:
+                        async with aiofiles.open(rangePath, 'wb') as f:
+                            async with client.session.get(url, headers=headers) as resp:
+                                while True:
+                                    if resp.status != 206:
+                                        print(resp.status)
+                                        return False
+                                    chunk = await resp.content.read(ChunkSize)
+                                    if not chunk:
+                                        return True
+                                    amountDict[self.cid] += len(chunk)
+                                    await f.write(chunk)
+                    if not await self.enretryable(real_part, client):
+                        what = self.types[exts.index(ext)] # 少进，所以单独索引
+                        print(self.fileName, "的", what, "部分下载范围", s, "-", e, "的内容失败", sep='')
+                        return False
+                # 成功后重置一下client再归还
+                await client.reset()    # 目前来看，获取源码->获取大小->获取文件是一个很连续的过程，只应该在最后才重置
+                return True
 
 
     @staticmethod
@@ -314,23 +421,121 @@ class DownCoroutine:
             await asyncio.sleep(3)
 
 
-    def copy_ranges(self, ext) -> bool:
-        # return 0: succeeded
-        target_files = []
-        for root, dirs, files in os.walk(self.tempDir):
-            if not dirs:
-                for file in files:
-                    if file.endswith(ext) and '-' in file:
-                        bisect.insort(target_files, file, key=lambda f: int(f.split('-', 1)[0]))
-        return os.system('copy /y /b %s "%splus%s">nul'%(
-                '+'.join(self.tempDir + file for file in target_files),
-                self.tempDir, ext
-        )) == 0
+    def truncate(self, ext, source_frag: tuple[int], target_start: int):
+        # 从中间截取到末尾
+        source_start = source_frag[0]
+        source_end = source_frag[1]
+        name = self.tempDir + f'{source_start}-{source_end}' + ext
+        with (open(name, 'rb') as fi,
+              open(name, 'rb+') as fo):
+            fi.seek(target_start - source_start)
+            fo.write(fi.read())
+            fo.truncate()
+        os.rename(name, f'{target_start}-{source_end}' + ext)
 
-    def mergeVA(self) -> bool:
+
+    # def copy_ranges(self, ext) -> bool:
+    #     target_files = []
+    #     for root, dirs, files in os.walk(self.tempDir):
+    #         if dirs:
+    #             continue
+    #         for file in files:
+    #             if file.endswith(ext) and '-' in file:
+    #                 _spt = file.split('-', 1)
+    #                 start = int(file[0])
+    #                 end = int(file[1])
+    #                 bisect.insort(target_files, (start, end), key=lambda f: f[0])
+    #     # return 0: succeeded
+    #     return os.system('copy /y /b %s "%splus%s">nul'%(
+    #             '+'.join(self.tempDir + start + '-' + end + ext for start, end in target_files),
+    #             self.tempDir, ext
+    #     )) == 0
+
+
+    def arrange_fragments(self) -> dict[str, list[list[int]]]:
+        # 检查并整理、合并缓存目录下的所有同后缀分片文件
+        # 遍历碎片文件并初步排序
+        # {ext:[[start1:int, end1:int], [start2, end2], ...]], ...}
+        extFragsDict = {}
+        for root, dirs, files in os.walk(self.tempDir):
+            if dirs:
+                continue
+            for f in files:
+                if '-' not in f:
+                    continue
+                # 这里一定是0级目录的分片文件
+                # 取出有关信息
+                extPos = f.index('.')
+                ext = f[extPos:]
+                splitted = f[:extPos].split('-', 1)
+                start = int(splitted[0])
+                end = int(splitted[1])
+                # 按实际大小更正end
+                actualSize = os.path.getsize(self.tempDir + f)
+                if actualSize == 0:
+                    os.remove(f)
+                    continue
+                theoretical_end = start + actualSize - 1
+                if end != theoretical_end:
+                    assert end > theoretical_end
+                    os.rename(f, f"{start}-{theoretical_end}" + ext)
+                if ext in extFragsDict:
+                    bisect.insort(extFragsDict[ext], [start, end], key=lambda r:r[0])
+                else:
+                    extFragsDict[ext] = [[start, end]]
+        # 找出相连的碎片文件并最终合并
+        for ext, frags in extFragsDict.items():
+            # seqFragsList: [[AStart1, AStart2, ..., AEnd], [BStart1, B...], ...]
+            seqFragsList = [frags.pop(0)]
+            for f in frags:
+                seq = seqFragsList.pop()
+                start1 = f[0]
+                end1 = f[1]
+                end2 = seq[-1]
+                # 不可能 start1 < start2
+                if start1 < end2 + 2:  # start1 ~ [start2, end2 + 1]
+                    if end1 <= end2:
+                        os.remove(self.tempDir + f'{start1}-{end1}' + ext)  # 没有用直接删掉
+                        continue
+                    # end1 ~ [end2 + 1, ...]
+                    if start1 <= end2:  # start1 != end2 + 1
+                        self.truncate(ext, f, end2 + 1)
+                    seq[-1] += 1
+                    seq.append(end1)
+                    seqFragsList.append(seq)
+                else:
+                    seqFragsList.append(seq)
+                    seqFragsList.append(f)
+            # 合并，并精简范围
+            for seq in seqFragsList:
+                if len(seq) == 2:   # 不用合并
+                    continue
+                seq[-1] += 1
+                source_frags = '+'.join('"' + self.tempDir + f'{start1}-{start2-1}' + ext + '"'
+                                        for start1, start2 in zip(seq, seq[1:]))
+                if os.system('copy /y /b %s "%s">nul'%(
+                    source_frags,
+                    self.tempDir + f'{seq[0]}-{seq[-1] - 1}' + ext)
+                             ) != 0:
+                    print(self.fileName, "的", ext, "部分在范围", seq[0], '-', seq[-1] - 1, "合并分片失败！(cid: ", self.cid, ")", sep='')
+                    continue
+                # 删除已合并的碎片
+                for start1, start2 in zip(seq, seq[1:]):
+                    os.remove(self.tempDir + f'{start1}-{start2-1}' + ext)
+                del seq[1:-1]   # 此后应该只有2个元素
+                seq[1] -= 1
+            # 放入经合并的现存碎片字典
+            extFragsDict[ext] = seqFragsList
+        # ret: {ext: [[start1, end1], [start2, end2], ...], ext':...}
+        return extFragsDict
+
+
+    def mergeVA(self, vFrag, aFrag) -> bool:
         # return 0: succeeded
-        return os.system('ffmpeg -v quiet -i "%splus%s" -i "%splus%s" -c:v copy -c:a copy "%s"'%(
-            self.tempDir, exts[0], self.tempDir, exts[1], self.filePath
+        return os.system('.\\tools\\ffmpeg.exe -v quiet -i "%s%s-%s%s" -i "%s%s-%s%s" -c:v copy -c:a copy "%s"'%(
+            self.tempDir, vFrag[0], vFrag[1], exts[0],
+            self.tempDir, aFrag[0], aFrag[1], exts[1],
+            self.filePath
         )) == 0
 
 
@@ -440,7 +645,7 @@ async def start(awaitable: Awaitable) -> bool:
 
 async def main(url, bvid, page: int):
     # os.system("chcp 65001")  # 更改控制台系统输出字符为utf-8
-    videoDir = "./video/"  # 视频保存路径
+    videoDir = "./downloaded_videos/"  # 视频保存路径
     ## 存在以下情况：
     # 1. 视频有选集
     # 2. 视频有分pages，只是没搞懂它的page、part有什么名字d区别，现在就把他叫做page，因为选集也可以有1part而无page在源代码中
@@ -477,13 +682,11 @@ async def main(url, bvid, page: int):
     print("下载全部选集/分集。。。")
     # 这里还可以添加选择框，让用户选择哪些要下载, 现在是全部下载
     # 启动任务
-    filePath = fileDir + title + exts[0]
-    coList = [DownCoroutine(urls, cid, filePath)]
-    for i, tu in enumerate(infoList):
-        if i == cur_index:
-            continue
-        filePath = fileDir + tu[1] + exts[0]
-        coList.append(DownCoroutine(None, tu[0], filePath, tu[2]))
+    coList = []
+    for n, (cid, title, url) in enumerate(infoList, 1):
+        filePath = fileDir + f'{n}. ' + title + exts[0]
+        coList.append(DownCoroutine(None, cid, filePath, url))
+    coList.insert(0, coList.pop(cur_index)) # 把当前视频提到第一个位置来做
     return await start(asyncio.gather(*coList))
 
 
@@ -497,7 +700,7 @@ async def init():
         page = int(page)
     # 初始化clients
     uaNum = len(user_agents)
-    for i in range(clientNum):
+    for i in range(ClientNum):
         session = await aiohttp.ClientSession().__aenter__()
         clients.append(Client(session))
         uaNum -= 1
