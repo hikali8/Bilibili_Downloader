@@ -1,5 +1,5 @@
 # Bilibili_Downloader
-A simple bilibili video downloader / 一个简单的多协程哔哩哔哩视频下载器
+A simple multi-coroutine bilibili video downloader / 一个简单的多协程哔哩哔哩视频下载器
 
 ![image](./sample_1.png)
 
