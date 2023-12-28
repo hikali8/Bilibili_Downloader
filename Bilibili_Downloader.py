@@ -1,4 +1,3 @@
-import math
 import pickle
 import subprocess, threading
 import sys
@@ -7,12 +6,10 @@ from collections.abc import Awaitable
 import re, time, secrets
 import os, shutil
 import asyncio, aiohttp, aiofiles
-from typing import Coroutine, Iterable
 
 import win32file, win32pipe
 import bisect
 
-from sortedcontainers import SortedSet
 
 user_agents = [
     "Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1; SV1; AcooBrowser; .NET CLR 1.1.4322; .NET CLR 2.0.50727)",
@@ -112,8 +109,6 @@ def amountDictSendThread():
         if sleep_time > 0:
             time.sleep(sleep_time)
             cur_time = next_time
-
-
 
 
 
@@ -399,6 +394,7 @@ class DownCoroutine:
                 ret = await DownCoroutine.enretryable(real_part, client)
         return int(header["Content-Range"].split('/')[1]) if ret else -1
 
+
     @staticmethod
     async def enretryable(func, client) -> bool:
         time = 1
@@ -422,7 +418,7 @@ class DownCoroutine:
 
 
     def truncate(self, ext, source_frag: tuple[int], target_start: int):
-        # 从中间截取到末尾
+        # 从文件中间截取到末尾
         source_start = source_frag[0]
         source_end = source_frag[1]
         name = self.tempDir + f'{source_start}-{source_end}' + ext
@@ -432,24 +428,6 @@ class DownCoroutine:
             fo.write(fi.read())
             fo.truncate()
         os.rename(name, f'{target_start}-{source_end}' + ext)
-
-
-    # def copy_ranges(self, ext) -> bool:
-    #     target_files = []
-    #     for root, dirs, files in os.walk(self.tempDir):
-    #         if dirs:
-    #             continue
-    #         for file in files:
-    #             if file.endswith(ext) and '-' in file:
-    #                 _spt = file.split('-', 1)
-    #                 start = int(file[0])
-    #                 end = int(file[1])
-    #                 bisect.insort(target_files, (start, end), key=lambda f: f[0])
-    #     # return 0: succeeded
-    #     return os.system('copy /y /b %s "%splus%s">nul'%(
-    #             '+'.join(self.tempDir + start + '-' + end + ext for start, end in target_files),
-    #             self.tempDir, ext
-    #     )) == 0
 
 
     def arrange_fragments(self) -> dict[str, list[list[int]]]:
