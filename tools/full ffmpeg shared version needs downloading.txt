@@ -1,0 +1,2 @@
+Full ffmpeg shared version can be found here:
+https://github.com/BtbN/FFmpeg-Builds/releases
