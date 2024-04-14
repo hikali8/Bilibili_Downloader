@@ -844,8 +844,7 @@ async def main(url, bvid, page: int):
 
 
 async def init():
-    # url = input("请输入视频链接：")
-    url = 'https://www.bilibili.com/video/BV1Eu411i7ae/?spm_id_from=333.788.recommend_more_video.1&vd_source=9647e28a3485a753b81965ea1843a398'
+    url = input("请输入视频链接：")
     matched = re.match(r'\s*(.*?(BV\w*)/?(?:\?p=(\d*))?)', url)
     url = matched.group(1)
     bvid = matched.group(2)
