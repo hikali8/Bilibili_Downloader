@@ -12,7 +12,7 @@ from collections.abc import Awaitable
 ClientNum = 5
 # 填入你的SESSDATA
 MySESSDATA = 'to_fill'
-
+PipeName = r'\\.\pipe\show_pipe2'
 
 user_agents = [
     "Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1; SV1; AcooBrowser; .NET CLR 1.1.4322; .NET CLR 2.0.50727)",
@@ -256,6 +256,8 @@ class DownCoroutine:
             if ext in fragsDict:
                 existingFrags = fragsDict[ext]
             # 开始下载
+            if self.urls[i] is None:
+                print("debugging")
             if not await self._download1(ext, self.types[i], self.urls[i], existingFrags):
                 self.end()
                 return False
@@ -478,6 +480,8 @@ class DownCoroutine:
                 }
                 async def real_part() -> bool:
                     nonlocal header
+                    if url is None:
+                        print('debugging')
                     async with client.session.get(url, headers=headers) as resp:
                         if resp.status != 206:
                             print(resp.status)
@@ -646,6 +650,7 @@ def get_vurl(source_code):  # 要获取清晰度最高的视频链接
         else:
             videos[height] = [data]
     videos = list(videos.items())
+
     global wanted_height, wanted_frameRate
     if wanted_height == -1:
         # 获取用户要的清晰度
@@ -677,6 +682,7 @@ def get_vurl(source_code):  # 要获取清晰度最高的视频链接
             print(" ", wanted_frameRate, "帧", end='')
         print("...（后续视频也将采取此清晰度）")
         print('-'*40)
+
     for height, datas in videos:    # 直接选，可以不排序
         if height != wanted_height:
             continue
@@ -687,12 +693,26 @@ def get_vurl(source_code):  # 要获取清晰度最高的视频链接
                 continue
             # vurls.append(baseUrl)
             # vurls.extend(backupUrls)
+            if baseUrl is None:
+                print('debugging')
             return baseUrl  # 先只要一个baseUrl试试水
-    # 原代码：
+        else:
+            print("当前所下视频不是或者没有选择清晰度时作为范例所选择的帧率或编码格式。现在选择清晰度和帧率最高的版本下载，即按照原方法进行")
+            return old_method(source_code)
+    else:
+        print("当前所下视频不是或者没有选择清晰度时作为范例所选择的清晰度。现在选择清晰度和帧率最高的版本下载，即按照原方法进行")
+        return old_method(source_code)
+    print("unexpected")
+# 原代码：
     # video_id = re.search(r'"video":\s*\[\{\s*"id":\s*(\d+?),', source_code).group(1)
     # p = re.compile(r'"id":\s*%s,\s*"baseUrl":\s*"(.*?)",' % video_id)
     # return p.findall(source_code)[-1]  # 下载最后一个AV1格式的视频，压缩率最高
 # 不知道为什么，HEVC的下载速度比AV1慢很多
+
+def old_method(source_code):
+    video_id = re.search(r'"video":\s*\[\{\s*"id":\s*(\d+?),', source_code).group(1)
+    p = re.compile(r'"id":\s*%s,\s*"baseUrl":\s*"(.*?)",' % video_id)
+    return p.findall(source_code)[-1]  # 下载最后一个AV1格式的视频，压缩率最高
 
 def get_aurl(source_code):
     return re.search(r'"audio":\[\{"id":\d+?,"baseUrl":"(.*?)"', source_code).group(1)  # 第一个就行，音质最高
@@ -749,7 +769,7 @@ async def start(awaitable: Awaitable) -> bool:
     global ph_write, amountDict, threadAlive
     t = time.time()
     ph_write = win32pipe.CreateNamedPipe(
-        r'\\.\pipe\show_pipe',
+        PipeName,
         win32pipe.PIPE_ACCESS_OUTBOUND,
         win32pipe.PIPE_TYPE_MESSAGE | win32pipe.PIPE_READMODE_MESSAGE | win32pipe.PIPE_WAIT,
         1, 65536, 65536,
@@ -824,7 +844,8 @@ async def main(url, bvid, page: int):
 
 
 async def init():
-    url = input("请输入视频链接：")
+    # url = input("请输入视频链接：")
+    url = 'https://www.bilibili.com/video/BV1Eu411i7ae/?spm_id_from=333.788.recommend_more_video.1&vd_source=9647e28a3485a753b81965ea1843a398'
     matched = re.match(r'\s*(.*?(BV\w*)/?(?:\?p=(\d*))?)', url)
     url = matched.group(1)
     bvid = matched.group(2)
@@ -847,7 +868,7 @@ async def init():
 if __name__ == '__main__':
     if '-c' in sys.argv:
         # 子进程
-        with open(r'\\.\pipe\show_pipe', "rb") as pf_read:  # 打开读取端的句柄
+        with open(PipeName, "rb") as pf_read:  # 打开读取端的句柄
             displayProcess(pf_read)
     else:
         #父进程
