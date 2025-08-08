@@ -7,11 +7,17 @@ import subprocess, threading, pickle
 import sys, time
 from collections.abc import Awaitable
 
+### 你只需要更改下面三个变量
 
+# 填入你的SESSDATA，在请求头的Cookies里面，是B站在Cookies中辨识身份的一串字符，会控制高清
+MySESSDATA = 'Your_SESSDATA'
+# 下载的视频格式codecs，后面用配置文件设置
+wanted_codecs = "av01"
 # 5个用户端
 ClientNum = 5
-# 填入你的SESSDATA
-MySESSDATA = 'to_fill'
+
+
+
 PipeName = r'\\.\pipe\show_pipe2'
 
 user_agents = [
@@ -91,7 +97,7 @@ ChunkSize = 1024 * 30
 # 创建命名管道
 ph_write = None
 
-def send_data(data):
+def send_into_pipe(data):
     global ph_write
     win32file.WriteFile(ph_write, len(data).to_bytes(2, byteorder='little') + data)
 
@@ -103,7 +109,7 @@ def amountDictSendThread():
     interval = 0.1  # 发送的间隔
     cur_time = time.time()
     while threadAlive:
-        send_data(pickle.dumps(amountDict))
+        send_into_pipe(pickle.dumps(amountDict))
         next_time = cur_time + interval
         cur_time = time.time()
         sleep_time = next_time - cur_time
@@ -215,14 +221,14 @@ class DownCoroutine:
         # 完事后file_path应该就是所需要的文件
         self.urls = va_urls
         self.bv_url = bv_url
-        self.cid = cid
+        self.cid = cid % 0x80000000 # 有时，cid过长必须裁截以作编号
         self.filePath = file_path.replace('/', '\\')
         self.fileName = os.path.basename(self.filePath)
         self.tempDir = self.filePath.rsplit('\\', 1)[0] + f'\\{cid}\\'
         return self.main_logic()
 
     def end(self):
-        send_data(pickle.dumps(True) + int.to_bytes(self.cid, 4, byteorder='little'))
+        send_into_pipe(pickle.dumps(True) + int.to_bytes(self.cid, 4, byteorder='little'))
         print(self.fileName, "is done!")
 
 
@@ -236,8 +242,8 @@ class DownCoroutine:
         # 检查是不是还没有urls
         if self.urls is None:
             assert self.bv_url is not None
-            send_data(pickle.dumps((self.fileName, 1, '', "正在获取源代码..."))
-                      + int.to_bytes(self.cid, 4, byteorder='little'))
+            send_into_pipe(pickle.dumps((self.fileName, 1, '', "正在获取源代码..."))
+                           + int.to_bytes(self.cid, 4, byteorder='little'))
             source_code = await get_source_code(self.bv_url)
             if source_code == '':
                 print(self.fileName, "获取源代码失败！", sep='')
@@ -262,8 +268,8 @@ class DownCoroutine:
                 self.end()
                 return False
         # 合并下载的所有碎片，并合并最终视频
-        send_data(pickle.dumps((self.fileName, 1, '', "正在合并下载碎片..."))
-                  + int.to_bytes(self.cid, 4, byteorder='little'))
+        send_into_pipe(pickle.dumps((self.fileName, 1, '', "正在合并下载碎片..."))
+                       + int.to_bytes(self.cid, 4, byteorder='little'))
         fragsDict = self.arrange_fragments()
         if exts[0] not in fragsDict or exts[1] not in fragsDict:
             print(self.fileName, "合并下载碎片未得！", sep='')
@@ -273,15 +279,15 @@ class DownCoroutine:
         aFrags = fragsDict[exts[1]]
         assert len(vFrags) == 1 and len(aFrags) == 1
         # 合并视音频
-        send_data(pickle.dumps((self.fileName, 1, '', "正在合并视音频..."))
-                  + int.to_bytes(self.cid, 4, byteorder='little'))
+        send_into_pipe(pickle.dumps((self.fileName, 1, '', "正在合并视音频..."))
+                       + int.to_bytes(self.cid, 4, byteorder='little'))
         if not self.mergeVA(vFrags[0], aFrags[0]):
             print(self.fileName, "合并视音频失败！")
             self.end()
             return False
         # 清理缓存
-        send_data(pickle.dumps((self.fileName, 1, '', "正在清理缓存..."))
-                  + int.to_bytes(self.cid, 4, byteorder='little'))
+        send_into_pipe(pickle.dumps((self.fileName, 1, '', "正在清理缓存..."))
+                       + int.to_bytes(self.cid, 4, byteorder='little'))
         shutil.rmtree(self.tempDir)
         self.end()
         return True
@@ -292,8 +298,8 @@ class DownCoroutine:
         # fragments: [[start1, end1], [start2, end2], ...]
         # i: 0视频, 1音频
         # 获取大小
-        send_data(pickle.dumps((self.fileName, 1, '', "正在获取" + what + "部分的大小..."))
-                  + int.to_bytes(self.cid, 4, byteorder='little'))
+        send_into_pipe(pickle.dumps((self.fileName, 1, '', "正在获取" + what + "部分的大小..."))
+                       + int.to_bytes(self.cid, 4, byteorder='little'))
         size = await self.get_size(url)
         if size == -1:
             print(self.fileName, "获取", what, "部分的大小失败！", sep='')
@@ -316,8 +322,8 @@ class DownCoroutine:
                 if final_start <= final_end:
                     undoneRangesList.append((final_start, final_end))
         # 开始下载
-        send_data(pickle.dumps((self.fileName, size, 'B', "正在下载" + what + "部分..."))
-                  + int.to_bytes(self.cid, 4, byteorder='little'))
+        send_into_pipe(pickle.dumps((self.fileName, size, 'B', "正在下载" + what + "部分..."))
+                       + int.to_bytes(self.cid, 4, byteorder='little'))
         amountDict[self.cid] = 0
         if not await self._download2(url, ext, undoneRangesList):
             print(self.fileName, "下载", what, "部分失败！", sep='')
@@ -637,7 +643,6 @@ async def get_source_code(url) -> str:
 
 wanted_height = -1
 wanted_frameRate = -1
-wanted_codecs = "av01"     # 写死codecs，后面用配置文件设置
 def get_vurl(source_code):  # 要获取清晰度最高的视频链接
     playinfo = json.loads(re.search(r'<script>\s*window.__playinfo__\s*=\s*(\{\s*.*?\s*\})\s*</script>',
                                     source_code, re.S).group(1))
@@ -702,7 +707,7 @@ def get_vurl(source_code):  # 要获取清晰度最高的视频链接
     else:
         print("当前所下视频不是或者没有选择清晰度时作为范例所选择的清晰度。现在选择清晰度和帧率最高的版本下载，即按照原方法进行")
         return old_method(source_code)
-    print("unexpected")
+    raise Exception("unexpected")
 # 原代码：
     # video_id = re.search(r'"video":\s*\[\{\s*"id":\s*(\d+?),', source_code).group(1)
     # p = re.compile(r'"id":\s*%s,\s*"baseUrl":\s*"(.*?)",' % video_id)
@@ -872,4 +877,3 @@ if __name__ == '__main__':
     else:
         #父进程
         asyncio.run(init())
-
